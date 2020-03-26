@@ -1,0 +1,12 @@
+Tested with zig 0.5.0+f7f563ea5
+
+zig build-exe basic-tcp-chat.zig
+./basic-tcp-chat
+
+This will print "listening at listening at 127.0.0.1:$PORT"
+To play with it you have to open 2 terminal windows and in each one
+(replacing $PORT with the one printed):
+
+nc 127.0.0.1 $PORT
+
+Now the terminals can talk to each other when you type your message and press enter.
