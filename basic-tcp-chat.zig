@@ -6,11 +6,13 @@ const os = std.os;
 pub const io_mode = .evented;
 
 pub fn main() anyerror!void {
-    const allocator = std.heap.page_allocator; // TODO use a more appropriate allocator
+    var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = &general_purpose_allocator.allocator;
 
     var server = net.StreamServer.init(.{});
     defer server.deinit();
 
+    // TODO handle concurrent accesses to this hash map
     var room = Room{ .clients = std.AutoHashMap(*Client, void).init(allocator) };
 
     try server.listen(net.Address.parseIp("127.0.0.1", 0) catch unreachable);
