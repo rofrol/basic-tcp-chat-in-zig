@@ -1,50 +1,66 @@
+// For Zig 0.12
+
 const std = @import("std");
 const net = std.net;
 
-const Queue = std.atomic.Queue;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
-// THIS _MUST_ be placed in your main.zig file
-pub const io_mode = .evented;
-
 pub fn main() anyerror!void {
-    var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
-    var allocator = general_purpose_allocator.allocator();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
 
-    var server = net.StreamServer.init(.{ .reuse_address = true });
-    defer server.deinit();
+    const address = try net.Address.parseIp("127.0.0.1", 5501);
+    var listener = try address.listen(.{
+        .reuse_address = true,
+        .kernel_backlog = 1024,
+    });
+    defer listener.deinit();
+    std.log.info("listening at {any}\n", .{address});
 
-    // TODO handle concurrent accesses to this hash map
-    var room = Room{ .clients = std.AutoHashMap(*Client, void).init(allocator) };
-
-    try server.listen(net.Address.parseIp("127.0.0.1", 0) catch unreachable);
-    std.log.info("listening at {}\n", .{server.listen_address});
-
-    var cleanup = &Queue(*ArenaAllocator).init();
-    _ = async cleaner(cleanup);
+    var room = Room{
+        .lock = .{},
+        .clients = std.AutoHashMap(*Client, void).init(allocator)
+     };
 
     while (true) {
-        var client_arena = ArenaAllocator.init(allocator);
-        const client = try client_arena.allocator().create(Client);
-        client.* = Client{
-            .stream = (try server.accept()).stream,
-            .handle_frame = async client.handle(&room, cleanup, &client_arena),
-        };
-        try room.clients.putNoClobber(client, {});
+        if (listener.accept()) |conn| {
+            var client_arena = ArenaAllocator.init(allocator);
+            const client = try client_arena.allocator().create(Client);
+            errdefer client_arena.deinit();
+
+            client.* = Client.init(client_arena, conn.stream, &room);
+
+            const thread = try std.Thread.spawn(.{}, Client.run, .{client});
+            thread.detach();
+        } else |err| {
+            std.log.err("failed to accept connection {}", .{err});
+        }
     }
 }
-const Client = struct {
-    stream: net.Stream,
-    handle_frame: @Frame(handle),
 
-    fn handle(self: *Client, room: *Room, cleanup: *Queue(*ArenaAllocator), arena: *ArenaAllocator) !void {
-        const stream = self.stream;
+const Client = struct {
+    room: *Room,
+    arena: ArenaAllocator,
+    stream: net.Stream,
+
+
+    pub fn init(arena: ArenaAllocator, stream: net.Stream, room: *Room) Client {
+        return .{
+            .room = room,
+            .stream = stream,
+            .arena = arena,
+        };
+    }
+
+    fn run(self: *Client) !void {
+        defer self.arena.deinit();
+        try self.room.add(self);
         defer {
-            stream.close();
-            var node = Queue(*ArenaAllocator).Node{ .data = arena, .next = undefined, .prev = undefined };
-            cleanup.put(&node);
+            self.room.remove(self);
+            self.stream.close();
         }
 
+        const stream = self.stream;
         _ = try stream.write("server: welcome to the chat server\n");
         while (true) {
             var buf: [100]u8 = undefined;
@@ -52,15 +68,31 @@ const Client = struct {
             if (n == 0) {
                 return;
             }
-            room.broadcast(buf[0..n], self);
+            self.room.broadcast(buf[0..n], self);
         }
     }
 };
 const Room = struct {
+    lock: std.Thread.RwLock,
     clients: std.AutoHashMap(*Client, void),
 
-    fn broadcast(room: *Room, msg: []const u8, sender: *Client) void {
-        var it = room.clients.keyIterator();
+    pub fn add(self: *Room, client: *Client) !void {
+        self.lock.lock();
+        defer self.lock.unlock();
+        try self.clients.put(client, {});
+    }
+
+    pub fn remove(self: *Room, client: *Client) void {
+        self.lock.lock();
+        defer self.lock.unlock();
+        _  = self.clients.remove(client);
+    }
+
+    fn broadcast(self: *Room, msg: []const u8, sender: *Client) void {
+        self.lock.lockShared();
+        defer self.lock.unlockShared();
+
+        var it = self.clients.keyIterator();
         while (it.next()) |key_ptr| {
             const client = key_ptr.*;
             if (client == sender) continue;
@@ -68,14 +100,3 @@ const Room = struct {
         }
     }
 };
-
-
-fn cleaner(cleanup: *Queue(*ArenaAllocator)) !void {
-    while (true) {
-        while (cleanup.get()) |node| {
-            node.data.deinit(); // the client arena allocator
-        }
-        // 5 seconds (in nano seconds)
-        std.time.sleep(5000000000);
-    }
-}
