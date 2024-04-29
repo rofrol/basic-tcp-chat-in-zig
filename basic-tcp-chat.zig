@@ -17,10 +17,7 @@ pub fn main() anyerror!void {
     defer listener.deinit();
     std.log.info("listening at {any}\n", .{address});
 
-    var room = Room{
-        .lock = .{},
-        .clients = std.AutoHashMap(*Client, void).init(allocator)
-     };
+    var room = Room{ .lock = .{}, .clients = std.AutoHashMap(*Client, void).init(allocator) };
 
     while (true) {
         if (listener.accept()) |conn| {
@@ -38,17 +35,21 @@ pub fn main() anyerror!void {
     }
 }
 
+var id_counter: u32 = 0;
+
 const Client = struct {
     room: *Room,
     arena: ArenaAllocator,
     stream: net.Stream,
-
+    id: u32,
 
     pub fn init(arena: ArenaAllocator, stream: net.Stream, room: *Room) Client {
+        id_counter += 1;
         return .{
             .room = room,
             .stream = stream,
             .arena = arena,
+            .id = id_counter,
         };
     }
 
@@ -68,7 +69,10 @@ const Client = struct {
             if (n == 0) {
                 return;
             }
-            self.room.broadcast(buf[0..n], self);
+
+            const alloc = self.arena.allocator();
+            const alloc_buf = try std.fmt.allocPrint(alloc, "Client {d}> {s}", .{ self.id, buf[0..n] });
+            self.room.broadcast(alloc_buf, self);
         }
     }
 };
@@ -85,13 +89,14 @@ const Room = struct {
     pub fn remove(self: *Room, client: *Client) void {
         self.lock.lock();
         defer self.lock.unlock();
-        _  = self.clients.remove(client);
+        _ = self.clients.remove(client);
     }
 
     fn broadcast(self: *Room, msg: []const u8, sender: *Client) void {
         self.lock.lockShared();
         defer self.lock.unlockShared();
 
+        std.debug.print("{s}", .{msg});
         var it = self.clients.keyIterator();
         while (it.next()) |key_ptr| {
             const client = key_ptr.*;
